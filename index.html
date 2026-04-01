@@ -603,41 +603,81 @@ async function startProcessing() {
 }
 
 function pollJob(url, jid) {
-  if (pollTmr) clearInterval(pollTmr);
+  if (pollTmr) clearTimeout(pollTmr);
   let failCount = 0;
-  pollTmr = setInterval(async () => {
-    if (cancelled) { clearInterval(pollTmr); showOv(false); return; }
-    try {
-      const r = await ft(`${url}/status/${jid}`, {}, 15000);
-      if (!r.ok) {
-        if (r.status===404) throw new Error('Job not found (may have expired)');
-        throw new Error(`Status HTTP ${r.status}`);
-      }
-      const j = await r.json(); failCount = 0;
-      document.getElementById('pbar').style.width = j.progress+'%';
-      document.getElementById('ppct').textContent = j.progress+'%';
-      document.getElementById('pstat').textContent = j.message || '...';
-      document.querySelectorAll('.cpb').forEach(b => { if(b) b.style.width = j.progress+'%'; });
+  let polling = true;
 
-      if (j.status==='done') {
-        clearInterval(pollTmr); showOv(false);
-        outFile = j.output_file;
-        vids.forEach(v => { v.status='done'; v.progress=100; }); render();
-        showResults(j); toast('AI cut complete! Ready to download.', 'ok');
-      } else if (j.status==='error') {
-        clearInterval(pollTmr); showOv(false);
-        vids.forEach(v => { v.status='error'; v.progress=0; }); render();
-        toast(`Processing error: ${j.message}`, 'err');
+  function stopPoll() { polling = false; if (pollTmr) clearTimeout(pollTmr); }
+
+  function doPoll() {
+    if (!polling || cancelled) { showOv(false); return; }
+
+    xhrGet(`${url}/status/${jid}`)
+      .then(j => {
+        if (!polling) return;
+        failCount = 0;
+
+        const pbar = document.getElementById('pbar');
+        const ppct = document.getElementById('ppct');
+        const pstat = document.getElementById('pstat');
+        if (pbar) pbar.style.width = j.progress + '%';
+        if (ppct) ppct.textContent = j.progress + '%';
+        if (pstat) pstat.textContent = j.message || '...';
+        document.querySelectorAll('.cpb').forEach(b => { if(b) b.style.width = j.progress+'%'; });
+
+        if (j.status === 'done') {
+          stopPoll(); showOv(false);
+          outFile = j.output_file;
+          vids.forEach(v => { v.status='done'; v.progress=100; }); render();
+          showResults(j); toast('AI cut complete! Ready to download.', 'ok');
+        } else if (j.status === 'error') {
+          stopPoll(); showOv(false);
+          vids.forEach(v => { v.status='error'; v.progress=0; }); render();
+          toast('Processing error: ' + j.message, 'err');
+        } else {
+          // Still running — poll again after delay
+          pollTmr = setTimeout(doPoll, 3000);
+        }
+      })
+      .catch(e => {
+        if (!polling) return;
+        failCount++;
+        console.warn('Poll fail #' + failCount + ':', e.message);
+        if (failCount >= 10) {
+          stopPoll(); showOv(false);
+          toast('Lost connection after 10 retries. Check your backend is still running.', 'err');
+          vids.forEach(v => { v.status='error'; }); render();
+        } else {
+          // Retry with backoff
+          pollTmr = setTimeout(doPoll, 3000 * Math.min(failCount, 3));
+        }
+      });
+  }
+
+  // Start polling after short delay to let job initialise
+  pollTmr = setTimeout(doPoll, 1500);
+}
+
+// XHR GET helper — no abort issues
+function xhrGet(url) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url);
+    xhr.timeout = 20000;
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch(e) { reject(new Error('Bad JSON from server')); }
+      } else {
+        let msg = 'HTTP ' + xhr.status;
+        try { msg = JSON.parse(xhr.responseText).detail || msg; } catch(_) {}
+        reject(new Error(msg));
       }
-    } catch(e) {
-      failCount++;
-      if (failCount >= 8) {
-        clearInterval(pollTmr); showOv(false);
-        toast(`Lost connection after ${failCount} retries: ${e.message}`, 'err');
-        vids.forEach(v => { v.status='error'; }); render();
-      }
-    }
-  }, 2500);
+    };
+    xhr.onerror = () => reject(new Error('Network error'));
+    xhr.ontimeout = () => reject(new Error('Request timed out'));
+    xhr.send();
+  });
 }
 
 // ── RESULTS ──
@@ -658,28 +698,40 @@ async function exportResult() {
   if (!outFile) return;
   const url = getUrl(); if (!url) { toast('Backend URL not set','err'); return; }
   const btn = document.getElementById('expBtn');
-  btn.disabled = true; btn.textContent = '⏳ Preparing...';
+  btn.disabled = true; btn.textContent = '⏳ Downloading...';
   try {
-    const r = await ft(`${url}/download/${outFile}`, {}, 60000);
-    if (!r.ok) {
-      const e = await r.json().catch(() => ({ detail:`HTTP ${r.status}` }));
-      throw new Error(e.detail || 'Download failed');
-    }
-    const blob = await r.blob();
+    // XHR blob download — no timeout, works for large files
+    const blob = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', `${url}/download/${outFile}`);
+      xhr.responseType = 'blob';
+      xhr.timeout = 0;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.response);
+        else reject(new Error('Download failed: HTTP ' + xhr.status));
+      };
+      xhr.onerror = () => reject(new Error('Network error during download'));
+      xhr.send();
+    });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `clipforge_output.${document.getElementById('outFmt').value}`;
-    a.click(); URL.revokeObjectURL(a.href);
+    a.download = 'clipforge_output.' + document.getElementById('outFmt').value;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
     toast('Download started!', 'ok');
   } catch(e) {
-    toast(`Download error: ${e.message}`, 'err');
+    toast('Download error: ' + e.message, 'err');
   } finally {
     btn.disabled=false; btn.innerHTML='⬇ Download Edited Video';
   }
 }
 
 function cancelJob() {
-  cancelled = true; clearInterval(pollTmr); showOv(false);
+  cancelled = true;
+  if (pollTmr) clearTimeout(pollTmr);
+  showOv(false);
   vids.forEach(v => { if (['processing','uploading'].includes(v.status)) v.status='ready'; });
   render(); toast('Cancelled', 'warn');
 }
