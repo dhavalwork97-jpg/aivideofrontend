@@ -503,6 +503,7 @@ async function startProcessing() {
 
   // Upload
   setUpProg(true);
+  toast('Uploading video to server...', 'warn');
   const fids = [], errs = [];
   for (let i=0; i<vids.length; i++) {
     if (cancelled) break;
@@ -521,9 +522,10 @@ async function startProcessing() {
       const pct = Math.round(((i+1)/vids.length)*100);
       setUpProgress(pct, `Uploaded ${i+1}/${vids.length}: ${vids[i].file.name}`);
     } catch(e) {
+      console.error('Upload error:', e);
       vids[i].status = 'error';
       errs.push(`${vids[i].file.name}: ${e.message}`);
-      toast(`Upload failed for ${vids[i].file.name}: ${e.message}`, 'err');
+      toast(`Upload failed: ${e.message}`, 'err');
     }
   }
   setUpProg(false);
@@ -661,7 +663,12 @@ function ft2(s) { const m=Math.floor(s/60); return `${m}:${Math.floor(s%60).toSt
 async function ft(url, opts={}, timeout=10000) {
   const ctl = new AbortController();
   const id = setTimeout(()=>ctl.abort(), timeout);
+  // Never manually set Content-Type for FormData - browser sets it with boundary
+  if (opts.body instanceof FormData && opts.headers) {
+    delete opts.headers['Content-Type'];
+  }
   try { return await fetch(url, {...opts, signal:ctl.signal}); }
+  catch(e) { clearTimeout(id); throw e; }
   finally { clearTimeout(id); }
 }
 
