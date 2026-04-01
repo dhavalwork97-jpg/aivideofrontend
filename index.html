@@ -570,7 +570,7 @@ async function startProcessing() {
     const r = await ft(`${url}/process`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ file_ids: fids, settings: getSettings() })
-    }, 15000);
+    }, 60000);
     if (!r.ok) {
       const e = await r.json().catch(() => ({ detail:`HTTP ${r.status}` }));
       throw new Error(e.detail || 'Failed to start job');
@@ -591,7 +591,7 @@ function pollJob(url, jid) {
   pollTmr = setInterval(async () => {
     if (cancelled) { clearInterval(pollTmr); showOv(false); return; }
     try {
-      const r = await ft(`${url}/status/${jid}`, {}, 8000);
+      const r = await ft(`${url}/status/${jid}`, {}, 15000);
       if (!r.ok) {
         if (r.status===404) throw new Error('Job not found (may have expired)');
         throw new Error(`Status HTTP ${r.status}`);
@@ -614,13 +614,13 @@ function pollJob(url, jid) {
       }
     } catch(e) {
       failCount++;
-      if (failCount >= 5) {
+      if (failCount >= 8) {
         clearInterval(pollTmr); showOv(false);
         toast(`Lost connection after ${failCount} retries: ${e.message}`, 'err');
         vids.forEach(v => { v.status='error'; }); render();
       }
     }
-  }, 1500);
+  }, 2500);
 }
 
 // ── RESULTS ──
