@@ -527,22 +527,27 @@ async function startProcessing() {
     setUpProgress(Math.round((i/vids.length)*100), `Uploading ${i+1}/${vids.length}: ${vids[i].file.name}`);
     const fd = new FormData(); fd.append('files', vids[i].file);
     try {
-      const r = await ft(`${url}/upload`, { method:'POST', body:fd }, 180000);
-      if (!r.ok) {
-        let errDetail = `HTTP ${r.status}`;
-        try { const ej = await r.json(); errDetail = ej.detail || errDetail; } catch(_){}
-        throw new Error(errDetail);
-      }
-      const d = await r.json();
+      // Use XHR instead of fetch — no timeout issues, has real progress events
+      const d = await xhrUpload(`${url}/upload`, fd, (pct) => {
+        setUpProgress(
+          Math.round((i/vids.length)*100 + pct/vids.length),
+          `Uploading ${i+1}/${vids.length}: ${vids[i].file.name} (${pct}%)`
+        );
+        const cards2 = document.querySelectorAll('.vcard');
+        if (cards2[i]) {
+          const bar = cards2[i].querySelector('.cpb');
+          if (bar) bar.style.width = pct + '%';
+        }
+      });
       if (!d.uploaded || !d.uploaded[0]) throw new Error('Bad server response');
       vids[i].fileId = d.uploaded[0].file_id;
       vids[i].status = 'ready'; vids[i].progress = 100;
       fids.push(d.uploaded[0].file_id);
-      const pct = Math.round(((i+1)/vids.length)*100);
-      setUpProgress(pct, `✓ Uploaded ${i+1}/${vids.length}: ${vids[i].file.name}`);
-      if (cards[i]) {
-        const chip = cards[i].querySelector('.chip');
-        const bar = cards[i].querySelector('.cpb');
+      setUpProgress(Math.round(((i+1)/vids.length)*100), `✓ Uploaded ${i+1}/${vids.length}: ${vids[i].file.name}`);
+      const cards2 = document.querySelectorAll('.vcard');
+      if (cards2[i]) {
+        const chip = cards2[i].querySelector('.chip');
+        const bar = cards2[i].querySelector('.cpb');
         if (chip) { chip.className='chip c-don'; chip.textContent='Uploaded'; }
         if (bar) bar.style.width='100%';
       }
@@ -551,8 +556,9 @@ async function startProcessing() {
       vids[i].status = 'error';
       errs.push(`${vids[i].file.name}: ${e.message}`);
       toast(`Upload failed: ${e.message}`, 'err');
-      if (cards[i]) {
-        const chip = cards[i].querySelector('.chip');
+      const cards2 = document.querySelectorAll('.vcard');
+      if (cards2[i]) {
+        const chip = cards2[i].querySelector('.chip');
         if (chip) { chip.className='chip c-err'; chip.textContent='Error'; }
       }
     }
@@ -567,15 +573,26 @@ async function startProcessing() {
   vids.forEach(v => { if (v.fileId && fids.includes(v.fileId)) v.status='processing'; });
   render();
   try {
-    const r = await ft(`${url}/process`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ file_ids: fids, settings: getSettings() })
-    }, 60000);
-    if (!r.ok) {
-      const e = await r.json().catch(() => ({ detail:`HTTP ${r.status}` }));
-      throw new Error(e.detail || 'Failed to start job');
-    }
-    const d = await r.json();
+    // Use XHR for /process too — avoids AbortController signal issues on slow servers
+    const d = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${url}/process`);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.timeout = 0;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); }
+          catch(e) { reject(new Error('Invalid response from server')); }
+        } else {
+          let msg = `HTTP ${xhr.status}`;
+          try { msg = JSON.parse(xhr.responseText).detail || msg; } catch(_) {}
+          reject(new Error(msg));
+        }
+      };
+      xhr.onerror = () => reject(new Error('Network error starting job'));
+      xhr.ontimeout = () => reject(new Error('Request timed out'));
+      xhr.send(JSON.stringify({ file_ids: fids, settings: getSettings() }));
+    });
     jobId = d.job_id;
     pollJob(url, jobId);
   } catch(e) {
@@ -688,6 +705,42 @@ function toast(msg, type='err') {
 }
 function hideToast() { document.getElementById('toast').classList.remove('show'); }
 function ft2(s) { const m=Math.floor(s/60); return `${m}:${Math.floor(s%60).toString().padStart(2,'0')}`; }
+
+// XHR upload with real progress — avoids fetch AbortController timeout issues
+function xhrUpload(url, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    // No Content-Type header — browser sets multipart boundary automatically
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch(e) {
+          reject(new Error('Invalid JSON response from server'));
+        }
+      } else {
+        let msg = `HTTP ${xhr.status}`;
+        try { msg = JSON.parse(xhr.responseText).detail || msg; } catch(_) {}
+        reject(new Error(msg));
+      }
+    });
+
+    xhr.addEventListener('error', () => reject(new Error('Network error during upload')));
+    xhr.addEventListener('timeout', () => reject(new Error('Upload timed out')));
+    xhr.addEventListener('abort', () => reject(new Error('Upload was cancelled')));
+
+    xhr.timeout = 0; // No timeout — let it run as long as needed
+    xhr.send(formData);
+  });
+}
 
 async function ft(url, opts={}, timeout=10000) {
   const ctl = new AbortController();
