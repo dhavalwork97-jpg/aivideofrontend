@@ -415,12 +415,20 @@ function previewVid(i) {
 // ── RENDER ──
 function render() {
   const list = document.getElementById('vlist');
-  const emp = document.getElementById('emp');
+  let emp = document.getElementById('emp');
+  // Re-create emp if it was lost when innerHTML was cleared
+  if (!emp) {
+    emp = document.createElement('div');
+    emp.id = 'emp'; emp.className = 'empty';
+    emp.innerHTML = '<div class="empty-ico">📂</div><div>No videos added yet</div><div style="font-size:10px">Add some videos to get started</div>';
+  }
   document.getElementById('vcnt').textContent = vids.length;
   if (!vids.length) {
     list.innerHTML=''; list.appendChild(emp); emp.style.display='flex';
     document.getElementById('tlsec').style.display='none'; return;
   }
+  // Remove emp from DOM first before clearing
+  if (emp.parentNode) emp.parentNode.removeChild(emp);
   emp.style.display='none'; list.innerHTML='';
   const cm = {ready:'c-rdy',uploading:'c-upl',processing:'c-prc',done:'c-don',error:'c-err'};
   const lm = {ready:'Ready',uploading:'Uploading',processing:'Processing',done:'Done',error:'Error'};
@@ -505,27 +513,48 @@ async function startProcessing() {
   setUpProg(true);
   toast('Uploading video to server...', 'warn');
   const fids = [], errs = [];
+  // Render once before loop to show uploading state
+  render();
   for (let i=0; i<vids.length; i++) {
     if (cancelled) break;
-    vids[i].status='uploading'; render();
+    vids[i].status='uploading';
+    // Update just this card's chip without full re-render
+    const cards = document.querySelectorAll('.vcard');
+    if (cards[i]) {
+      const chip = cards[i].querySelector('.chip');
+      if (chip) { chip.className='chip c-upl'; chip.textContent='Uploading'; }
+    }
+    setUpProgress(Math.round((i/vids.length)*100), `Uploading ${i+1}/${vids.length}: ${vids[i].file.name}`);
     const fd = new FormData(); fd.append('files', vids[i].file);
     try {
       const r = await ft(`${url}/upload`, { method:'POST', body:fd }, 180000);
       if (!r.ok) {
-        const e = await r.json().catch(() => ({ detail:`HTTP ${r.status}` }));
-        throw new Error(e.detail || `Upload HTTP ${r.status}`);
+        let errDetail = `HTTP ${r.status}`;
+        try { const ej = await r.json(); errDetail = ej.detail || errDetail; } catch(_){}
+        throw new Error(errDetail);
       }
       const d = await r.json();
+      if (!d.uploaded || !d.uploaded[0]) throw new Error('Bad server response');
       vids[i].fileId = d.uploaded[0].file_id;
       vids[i].status = 'ready'; vids[i].progress = 100;
       fids.push(d.uploaded[0].file_id);
       const pct = Math.round(((i+1)/vids.length)*100);
-      setUpProgress(pct, `Uploaded ${i+1}/${vids.length}: ${vids[i].file.name}`);
+      setUpProgress(pct, `✓ Uploaded ${i+1}/${vids.length}: ${vids[i].file.name}`);
+      if (cards[i]) {
+        const chip = cards[i].querySelector('.chip');
+        const bar = cards[i].querySelector('.cpb');
+        if (chip) { chip.className='chip c-don'; chip.textContent='Uploaded'; }
+        if (bar) bar.style.width='100%';
+      }
     } catch(e) {
       console.error('Upload error:', e);
       vids[i].status = 'error';
       errs.push(`${vids[i].file.name}: ${e.message}`);
       toast(`Upload failed: ${e.message}`, 'err');
+      if (cards[i]) {
+        const chip = cards[i].querySelector('.chip');
+        if (chip) { chip.className='chip c-err'; chip.textContent='Error'; }
+      }
     }
   }
   setUpProg(false);
@@ -571,7 +600,7 @@ function pollJob(url, jid) {
       document.getElementById('pbar').style.width = j.progress+'%';
       document.getElementById('ppct').textContent = j.progress+'%';
       document.getElementById('pstat').textContent = j.message || '...';
-      document.querySelectorAll('.cpb').forEach(b => b.style.width = j.progress+'%');
+      document.querySelectorAll('.cpb').forEach(b => { if(b) b.style.width = j.progress+'%'; });
 
       if (j.status==='done') {
         clearInterval(pollTmr); showOv(false);
